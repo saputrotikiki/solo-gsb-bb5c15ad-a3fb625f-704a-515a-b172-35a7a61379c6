@@ -324,6 +324,39 @@ input[type="range"] {
   gap: 0.5rem;
 }
 
+/* 题序承诺异常卡片 */
+.tamper-card { border-color: var(--danger); }
+.tamper-card h2 { color: var(--danger); }
+
+/* 题序承诺核验 */
+.verify-status { font-size: 1.05rem; font-weight: 700; margin: 0; }
+.verify-status.ok { color: var(--ok); }
+.verify-status.fail { color: var(--bad); }
+.verify-status.unknown { color: var(--muted); }
+
+.verify-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.4rem 0.8rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+
+.verify-list dt { color: var(--muted); white-space: nowrap; }
+
+.verify-list dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
 /* 结果 */
 .score { font-size: 1.2rem; font-weight: 700; margin: 0; }
 

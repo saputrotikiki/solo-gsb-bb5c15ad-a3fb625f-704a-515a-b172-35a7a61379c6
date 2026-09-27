@@ -6,6 +6,10 @@
  * 设计要点：
  * - 音频文件只保存在本机磁盘（DATA_DIR，默认 ./data/<sessionId>/）
  * - 会话状态（含 X 映射）只保存在本机内存中，提交前任何接口都不会泄露映射
+ * - 题序承诺核验：创建会话时生成 32 字节随机盐，按固定格式
+ *   abx-v1|会话ID|题数|逐题A/B串|盐的十六进制 计算 SHA-256 承诺值；
+ *   提交前创建 / 状态 / 恢复接口只返回承诺值（不返回盐与映射），
+ *   提交后结果才揭示盐与映射，供浏览器重算比对
  * - X 音频通过 chunked 流式响应下发（不带 Content-Length / 文件名），
  *   避免客户端通过文件大小或扩展名推断 X 的真实身份
  */
@@ -41,6 +45,18 @@ const recoveryTokens = new Map();
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+/**
+ * 题序承诺值：SHA-256(`abx-v1|会话ID|题数|逐题A/B串|盐的十六进制`)。
+ * 创建会话时生成 32 字节随机盐并计算承诺值；提交前各接口只下发承诺值，
+ * 提交后才随结果揭示盐与映射，浏览器可按同一格式重算比对。
+ */
+function computeCommitment(id, numTrials, mapping, saltHex) {
+  return crypto
+    .createHash('sha256')
+    .update(`abx-v1|${id}|${numTrials}|${mapping}|${saltHex}`, 'utf8')
+    .digest('hex');
 }
 
 /** 使会话的恢复标识立即失效（提交、删除、过期时调用） */
@@ -219,6 +235,11 @@ app.post('/api/session', (req, res) => {
     const recoveryToken = crypto.randomBytes(32).toString('base64url');
     const tokenHash = hashToken(recoveryToken);
 
+    // 题序承诺：32 字节随机盐 + 固定格式 SHA-256；盐与映射提交前不下发
+    const mapping = trials.map((t) => t.x).join('');
+    const saltHex = crypto.randomBytes(32).toString('hex');
+    const commitment = computeCommitment(id, numTrials, mapping, saltHex);
+
     sessions.set(id, {
       id,
       dir: req.abxDir,
@@ -227,6 +248,9 @@ app.post('/api/session', (req, res) => {
       nameA: req.files.a[0].originalname,
       nameB: req.files.b[0].originalname,
       trials,
+      mapping,
+      saltHex,
+      commitment,
       submitted: false,
       results: null,
       createdAt: Date.now(),
@@ -234,7 +258,7 @@ app.post('/api/session', (req, res) => {
     });
     recoveryTokens.set(tokenHash, id);
 
-    res.json({ id, numTrials, recoveryToken });
+    res.json({ id, numTrials, recoveryToken, commitment });
   });
 });
 
@@ -259,13 +283,15 @@ app.get('/api/session/:id', (req, res) => {
     numTrials: s.trials.length,
     answers: s.trials.map((t) => t.answer),
     confidences: s.trials.map((t) => t.confidence),
+    commitment: s.commitment, // 只有承诺值；盐与映射提交前不下发
     submitted: s.submitted,
-    results: s.submitted ? s.results : undefined,
+    results: s.submitted ? s.results : undefined, // 已提交：返回同一揭示数据
   });
 });
 
 // 会话恢复：凭恢复标识找回未提交会话的非敏感状态。
-// 只返回题数、已选答案与把握度，绝不包含 X 映射；已提交/删除/过期的会话一律 404。
+// 只返回题数、已选答案、把握度与题序承诺值，绝不包含盐与 X 映射；
+// 已提交/删除/过期的会话一律 404。
 app.post('/api/session/recover', (req, res) => {
   const token = req.body && typeof req.body.token === 'string' ? req.body.token : '';
   const s = token ? sessions.get(recoveryTokens.get(hashToken(token))) : null;
@@ -277,6 +303,7 @@ app.post('/api/session/recover', (req, res) => {
     numTrials: s.trials.length,
     answers: s.trials.map((t) => t.answer),
     confidences: s.trials.map((t) => t.confidence),
+    commitment: s.commitment, // 供浏览器与本机保存的原承诺值比对
     submitted: false,
   });
 });
@@ -346,7 +373,7 @@ app.post('/api/session/:id/submit', (req, res) => {
   if (s.trials.some((t) => !t.answer || t.confidence === null)) {
     return res.status(400).json({ error: '还有题目未作答或未选择把握度，无法提交' });
   }
-  // 提交后一次性揭示：正确率 + 逐题映射（含把握度）+ 分档校准
+  // 提交后一次性揭示：正确率 + 逐题映射（含把握度）+ 分档校准 + 题序承诺揭示
   const detail = s.trials.map((t, i) => ({
     trial: i + 1,
     x: t.x,
@@ -361,6 +388,10 @@ app.post('/api/session/:id/submit', (req, res) => {
     accuracy: correct / detail.length,
     detail,
     calibration: buildCalibration(s.trials),
+    // 题序承诺揭示：盐与映射提交后才下发；重复提交与已提交状态读取返回同一数据
+    salt: s.saltHex,
+    mapping: s.mapping,
+    commitment: s.commitment,
   };
   s.submitted = true;
   dropRecoveryToken(s); // 提交后恢复标识立即失效

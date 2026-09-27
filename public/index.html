@@ -26,6 +26,13 @@
         <p class="hint">恢复标识仅保存在本机浏览器中；提交或删除后立即失效。</p>
       </div>
 
+      <!-- 题序承诺异常提示（恢复时承诺值与创建时本机保存的不一致，阻止继续答题） -->
+      <div id="view-tamper" class="card tamper-card hidden">
+        <h2>题序承诺核验异常</h2>
+        <p class="hint">服务端返回的题序承诺值与创建会话时本机保存的原值不一致，题序映射可能已被更改或会话数据损坏。为保护测试有效性，已阻止继续该测试，请放弃并删除该会话后重新开始。</p>
+        <button id="btnDiscardTamper" class="danger">放弃并删除该会话</button>
+      </div>
+
       <div class="card">
         <h2>上传音频</h2>
         <p class="hint">请选择两个<strong>同格式</strong>的音频文件（如两个 WAV）。统一时间轴以较短的一个为准。</p>
@@ -136,6 +143,22 @@
           <tbody></tbody>
         </table>
         <button id="btnAgain" class="primary">再来一轮</button>
+      </div>
+
+      <div class="card">
+        <h2>题序承诺核验</h2>
+        <p id="verifyStatus" class="verify-status unknown">核验中…</p>
+        <dl class="verify-list">
+          <dt>本机保存的原承诺值</dt>
+          <dd id="verifySaved">—</dd>
+          <dt>揭示后重算的承诺值</dt>
+          <dd id="verifyRecomputed">—</dd>
+          <dt>随机盐（hex）</dt>
+          <dd id="verifySalt">—</dd>
+          <dt>题序映射（逐题 X 实际值）</dt>
+          <dd id="verifyMapping">—</dd>
+        </dl>
+        <p class="hint">创建会话时服务端生成 32 字节随机盐，并按 <code>abx-v1|会话ID|题数|逐题A/B串|盐</code> 计算 SHA-256 承诺值，承诺值随恢复信息保存在本机；提交前任何接口都不返回盐与映射，提交后服务端才揭示。此处由浏览器用 Web Crypto 重新计算承诺值，并与最初保存的原值比对：一致说明答题期间题序未被更改。本机没有原承诺值时显示「无法核验」，不会用服务端当前值代替。</p>
       </div>
 
       <div class="card">
