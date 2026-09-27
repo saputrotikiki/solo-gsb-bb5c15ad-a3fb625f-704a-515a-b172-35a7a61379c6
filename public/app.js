@@ -34,11 +34,14 @@ let currentTrial = 0;
 const RECOVERY_KEY = 'abx.recovery';
 let pendingResume = null;    // 页面加载时探测到的可恢复会话
 
+// 创建会话时服务端下发的题序承诺值随恢复信息保存在本机；
+// 恢复时用于对照服务端当前承诺（变化则拒绝继续答题），提交后用于结果页核验
 function saveRecovery() {
   if (!session || !session.recoveryToken) return;
   localStorage.setItem(RECOVERY_KEY, JSON.stringify({
     token: session.recoveryToken,
     trial: currentTrial,
+    commitment: session.commitment || null,
   }));
 }
 
@@ -52,6 +55,80 @@ function loadSavedRecovery() {
 
 function clearRecovery() {
   localStorage.removeItem(RECOVERY_KEY);
+}
+
+// ---------------------------------------------------------------------------
+// 题序承诺核验（Web Crypto，纯前端计算）
+//
+// 固定格式与服务端一致：abx-v1|会话ID|题数|逐题A/B串|盐的十六进制
+// 承诺值仅以创建会话时本机保存的原值为准；服务端提交后返回的承诺值只作展示，
+// 绝不能拿来代替原承诺值。
+// ---------------------------------------------------------------------------
+
+const COMMITMENT_VERSION = 'abx-v1';
+
+function commitmentMessage(id, numTrials, xSequence, saltHex) {
+  return `${COMMITMENT_VERSION}|${id}|${numTrials}|${xSequence}|${saltHex}`;
+}
+
+/** 按固定格式计算承诺值（十六进制 SHA-256） */
+async function computeCommitment(id, numTrials, xSequence, saltHex) {
+  const buf = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(commitmentMessage(id, numTrials, xSequence, saltHex)),
+  );
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const SALT64_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * 结果页核验：用创建时本机保存的原承诺值对照揭示数据重算。
+ * 返回 { status: 'pass' | 'fail' | 'unknown', computed, detailConsistent }
+ *  - unknown：本机没有原承诺值（无法核验），不使用服务端当前值代替
+ *  - fail：原承诺值存在但重算不一致（题序 / 盐异常，或揭示数据自相矛盾）
+ *  - pass：重算承诺与原值一致，且逐题映射串与结果明细逐题吻合
+ */
+async function verifyCommitment(results, originalCommitment) {
+  const out = { status: 'unknown', computed: null, detailConsistent: null };
+  if (!originalCommitment || typeof originalCommitment !== 'string') return out;
+  if (
+    !results ||
+    typeof results.saltHex !== 'string' || !SALT64_RE.test(results.saltHex) ||
+    typeof results.xSequence !== 'string' || !/^[AB]+$/.test(results.xSequence) ||
+    !HEX64_RE.test(originalCommitment) ||
+    !session
+  ) {
+    out.status = 'fail';
+    return out;
+  }
+  const numTrials = session.numTrials;
+  if (
+    results.total !== numTrials ||
+    results.xSequence.length !== numTrials ||
+    !Array.isArray(results.detail) || results.detail.length !== numTrials
+  ) {
+    out.status = 'fail';
+    return out;
+  }
+  // 映射串必须与结果明细逐题一致，防止只伪造哈希输入而明细不同
+  const detailSequence = results.detail
+    .slice()
+    .sort((a, b) => a.trial - b.trial)
+    .map((d) => d.x)
+    .join('');
+  out.detailConsistent = detailSequence === results.xSequence;
+
+  out.computed = await computeCommitment(
+    session.id, numTrials, results.xSequence, results.saltHex,
+  );
+  out.status = out.detailConsistent && out.computed === originalCommitment
+    ? 'pass'
+    : 'fail';
+  return out;
 }
 
 let actx = null;             // AudioContext
@@ -586,7 +663,11 @@ $('#btnStart').addEventListener('click', async () => {
     if (pendingResume) {
       await fetch(`/api/session/${pendingResume.id}`, { method: 'DELETE' }).catch(() => {});
       pendingResume = null;
-      $('#view-resume').classList.add('hidden');
+      const oldCard = $('#view-resume');
+      oldCard.classList.add('hidden');
+      oldCard.classList.remove('tampered');
+      $('#resumeCommitError').textContent = '';
+      $('#btnResume').classList.remove('hidden');
     }
 
     const fd = new FormData();
@@ -628,25 +709,43 @@ async function initRecovery() {
     });
     if (!res.ok) throw new Error('recover failed');
     const data = await res.json();
+    // 题序承诺核验：服务端当前承诺必须与创建时本机保存的原值一致，
+    // 任何变化都视为题序可能被中途篡改，阻止继续答题（只能删除该会话）
+    const tampered = typeof saved.commitment === 'string'
+      && data.commitment !== saved.commitment;
     pendingResume = {
       ...data,
       token: saved.token,
       trial: Math.min(Math.max(0, saved.trial | 0), data.numTrials - 1),
+      tampered: Boolean(tampered),
     };
-    const answered = data.answers.filter(
-      (a, i) => a && data.confidences[i] != null,
-    ).length;
-    $('#resumeInfo').textContent =
-      `检测到本机有未提交的测试：共 ${data.numTrials} 题，已完成 ${answered} 题，` +
-      `上次进行到第 ${pendingResume.trial + 1} 题。`;
-    $('#view-resume').classList.remove('hidden');
+    const card = $('#view-resume');
+    card.classList.toggle('tampered', tampered);
+    if (tampered) {
+      $('#resumeInfo').textContent =
+        `检测到会话异常：该会话（共 ${data.numTrials} 题）的题序承诺值已与创建时本机保存的不一致，` +
+        '题序可能在提交前被篡改。为保证测试有效，已阻止继续答题。';
+      $('#resumeCommitError').textContent =
+        '⛔ 题序承诺核验未通过：请勿继续使用该会话，可选择删除它。';
+      $('#btnResume').classList.add('hidden');
+    } else {
+      $('#resumeCommitError').textContent = '';
+      $('#btnResume').classList.remove('hidden');
+      const answered = data.answers.filter(
+        (a, i) => a && data.confidences[i] != null,
+      ).length;
+      $('#resumeInfo').textContent =
+        `检测到本机有未提交的测试：共 ${data.numTrials} 题，已完成 ${answered} 题，` +
+        `上次进行到第 ${pendingResume.trial + 1} 题。`;
+    }
+    card.classList.remove('hidden');
   } catch (_) {
     clearRecovery(); // 会话已提交、删除或过期，恢复标识不再有效
   }
 }
 
 $('#btnResume').addEventListener('click', async () => {
-  if (!pendingResume) return;
+  if (!pendingResume || pendingResume.tampered) return; // 承诺不一致：禁止继续
   const btn = $('#btnResume');
   btn.disabled = true;
   btn.textContent = '正在恢复…';
@@ -656,6 +755,9 @@ $('#btnResume').addEventListener('click', async () => {
       id: resume.id,
       numTrials: resume.numTrials,
       recoveryToken: resume.token,
+      // 必须保留创建时的原承诺值：loadTrial 会再次 saveRecovery，
+      // 缺失会导致本机原承诺被 null 覆盖，提交后无法核验
+      commitment: resume.commitment,
     };
     answers = resume.answers.slice();
     confidences = resume.confidences.slice();
@@ -677,7 +779,11 @@ $('#btnDiscardResume').addEventListener('click', async () => {
   }
   pendingResume = null;
   clearRecovery();
-  $('#view-resume').classList.add('hidden');
+  const card = $('#view-resume');
+  card.classList.add('hidden');
+  card.classList.remove('tampered');
+  $('#resumeCommitError').textContent = '';
+  $('#btnResume').classList.remove('hidden');
 });
 
 $('#btnPlay').addEventListener('click', async () => {
@@ -783,6 +889,9 @@ document.querySelectorAll('.conf-btn').forEach((b) => {
 
 $('#btnSubmit').addEventListener('click', async () => {
   if (!confirm('提交后将一次性揭晓全部答案，且不可再修改。确定提交？')) return;
+  // 先取出创建时本机保存的原承诺值（核验唯一基准），再清掉恢复信息；
+  // 绝不能用服务端当前返回的承诺值代替
+  const originalCommitment = (loadSavedRecovery() || {}).commitment || null;
   const res = await fetch(`/api/session/${session.id}/submit`, { method: 'POST' });
   const data = await res.json();
   if (!res.ok) {
@@ -791,7 +900,7 @@ $('#btnSubmit').addEventListener('click', async () => {
   }
   pause();
   clearRecovery(); // 提交后恢复标识立即失效（服务端同步作废）
-  showResults(data.results);
+  await showResults(data.results, originalCommitment);
 });
 
 $('#btnAgain').addEventListener('click', async () => {
@@ -820,7 +929,7 @@ $('#btnAgain').addEventListener('click', async () => {
 // 结果展示
 // ---------------------------------------------------------------------------
 
-function showResults(results) {
+async function showResults(results, originalCommitment) {
   const pct = (results.accuracy * 100).toFixed(1);
   $('#scoreLabel').textContent =
     `答对 ${results.correct} / ${results.total} 题，正确率 ${pct}%`;
@@ -837,7 +946,64 @@ function showResults(results) {
     tbody.appendChild(tr);
   }
   renderCalibration(results.calibration);
+  await renderCommitmentVerify(results, originalCommitment);
   show('view-result');
+}
+
+/**
+ * 结果页题序承诺核验：用创建时本机保存的承诺值（唯一基准）与提交后揭示的
+ * 盐 + 逐题 A/B 串按固定格式用 Web Crypto 重算，显示
+ * 「核验通过 / 核验失败 / 无法核验」。服务端返回的承诺值仅作展示对照，
+ * 不能代替本机原值。
+ */
+async function renderCommitmentVerify(results, originalCommitment) {
+  const box = $('#commitVerify');
+  const verdictEl = $('#commitVerdict');
+  const descEl = $('#commitDesc');
+  box.classList.remove('pass', 'fail', 'unknown');
+
+  let v;
+  try {
+    v = await verifyCommitment(results, originalCommitment);
+  } catch (_) {
+    v = { status: 'fail', computed: null, detailConsistent: null };
+  }
+
+  const serverCommitment = results && typeof results.commitment === 'string'
+    ? results.commitment : '';
+  const row = (k, val) =>
+    `<tr><th>${k}</th><td class="mono">${val || '（缺失）'}</td></tr>`;
+  const detailRows = [
+    row('创建时本机保存的承诺值', originalCommitment),
+  ];
+  if (serverCommitment) detailRows.push(row('服务端揭示的承诺值', serverCommitment));
+  if (v.computed) detailRows.push(row('本机重新计算的承诺值', v.computed));
+  if (results && results.saltHex) detailRows.push(row('揭示的随机盐（hex）', results.saltHex));
+  if (results && results.xSequence) detailRows.push(row('逐题 A/B 串', results.xSequence));
+  $('#commitDetails tbody').innerHTML = detailRows.join('');
+
+  if (v.status === 'pass') {
+    box.classList.add('pass');
+    verdictEl.textContent = '✓ 核验通过';
+    descEl.textContent =
+      '用提交后揭示的随机盐与逐题 A/B 串，按固定格式 ' +
+      'abx-v1|会话ID|题数|逐题A/B串|盐hex 在本机重算 SHA-256，' +
+      '结果与创建会话时保存在本机的承诺值完全一致，且与逐题明细吻合：' +
+      '题序在整个测试过程中未被篡改。';
+  } else if (v.status === 'fail') {
+    box.classList.add('fail');
+    verdictEl.textContent = '✗ 核验失败';
+    descEl.textContent =
+      '用揭示的盐与逐题 A/B 串重算的承诺值（或结果明细）与创建时本机保存的承诺值不一致，' +
+      '题序可能在提交前被篡改，或揭示数据不完整 / 自相矛盾。请不要采信本次结果。';
+  } else {
+    box.classList.add('unknown');
+    verdictEl.textContent = '？ 无法核验';
+    descEl.textContent =
+      '本机没有创建会话时保存的原承诺值（例如更换了浏览器、清理过站点数据，' +
+      '或本机存储被禁用），缺少核验基准，因此无法判断题序是否被中途修改。' +
+      '服务端当前返回的承诺值不能代替原承诺值作为基准。';
+  }
 }
 
 // ---------------------------------------------------------------------------

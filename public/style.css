@@ -318,11 +318,50 @@ input[type="range"] {
 /* 恢复会话卡片 */
 .resume-card { border-color: var(--accent); }
 
+/* 承诺值不一致：阻止继续答题，仅允许删除 */
+.resume-card.tampered { border-color: var(--danger); }
+
 .resume-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
 }
+
+/* 题序承诺核验结果 */
+.commit-verify {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: var(--bg);
+}
+
+.commit-verify.pass { border-left-color: var(--ok); }
+.commit-verify.fail { border-left-color: var(--bad); }
+.commit-verify.unknown { border-left-color: var(--muted); }
+
+.commit-verdict {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.commit-verify.pass .commit-verdict { color: var(--ok); }
+.commit-verify.fail .commit-verdict { color: var(--bad); }
+.commit-verify.unknown .commit-verdict { color: var(--muted); }
+
+#commitDetails { margin-top: 0.3rem; font-size: 0.8rem; }
+#commitDetails th {
+  text-align: left;
+  width: 42%;
+  white-space: normal;
+  font-weight: 600;
+}
+#commitDetails td { text-align: left; word-break: break-all; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 /* 结果 */
 .score { font-size: 1.2rem; font-weight: 700; margin: 0; }

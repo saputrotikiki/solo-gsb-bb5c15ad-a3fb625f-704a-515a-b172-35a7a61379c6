@@ -19,11 +19,12 @@
       <div id="view-resume" class="card resume-card hidden">
         <h2>继续上次测试</h2>
         <p id="resumeInfo" class="hint"></p>
+        <p id="resumeCommitError" class="error"></p>
         <div class="resume-actions">
           <button id="btnResume" class="primary">继续上次测试</button>
           <button id="btnDiscardResume">放弃并删除该会话</button>
         </div>
-        <p class="hint">恢复标识仅保存在本机浏览器中；提交或删除后立即失效。</p>
+        <p class="hint">恢复标识与题序承诺值仅保存在本机浏览器中；提交或删除后立即失效。</p>
       </div>
 
       <div class="card">
@@ -129,6 +130,19 @@
       <div class="card">
         <h2>测试结果</h2>
         <p id="scoreLabel" class="score"></p>
+
+        <!-- 题序承诺核验：以创建时本机保存的承诺值为唯一基准，用 Web Crypto 重算 -->
+        <div id="commitVerify" class="commit-verify">
+          <p id="commitVerdict" class="commit-verdict"></p>
+          <p id="commitDesc" class="hint"></p>
+          <details>
+            <summary>核验明细（承诺值 / 随机盐 / 逐题 A/B 串）</summary>
+            <table id="commitDetails">
+              <tbody></tbody>
+            </table>
+          </details>
+        </div>
+
         <table id="resultTable">
           <thead>
             <tr><th>题号</th><th>X 实际是</th><th>你的答案</th><th>把握度</th><th>判定</th></tr>
